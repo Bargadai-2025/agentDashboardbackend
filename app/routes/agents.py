@@ -46,7 +46,21 @@ async def start_journey(agentId: str, payload: dict):
         update_data["journeyTracking.optimizedRoute"] = optimizedRoute
 
     await agent_coll.update_one({"_id": ObjectId(agentId)}, {"$set": update_data})
+
+    # Notify Manager
+    agent = await agent_coll.find_one({"_id": ObjectId(agentId)})
+    notif_coll = get_collection("notifications")
+    await notif_coll.insert_one({
+        "agentId": ObjectId(agentId),
+        "agentName": agent.get("name"),
+        "type": "journey_started",
+        "message": f"Agent {agent.get('name')} has started their journey.",
+        "timestamp": datetime.utcnow(),
+        "read": False
+    })
+
     return {"status": 200, "msg": "Journey started"}
+
 
 
 @router.post("/track-location/{agentId}")
@@ -92,6 +106,40 @@ async def track_location(agentId: str, payload: dict):
             break
 
     point = {"lat": lat, "lng": lng, "timestamp": datetime.utcnow()}
+    
+    # Check for proximity to assigned customers for arrival notification
+    customer_coll = get_collection("customers")
+    notif_coll = get_collection("notifications")
+    
+    agent_customers = agent.get("customers", [])
+    for cust_id in agent_customers:
+        customer = await customer_coll.find_one({"_id": cust_id})
+        if customer and customer.get("location"):
+            cloc = customer["location"]
+            dist = haversine_distance(lat, lng, cloc["lat"], cloc["lng"])
+            
+            # If within 50m and not already notified recently? 
+            # For simplicity, we just notify if they are "at" the house.
+            # In a real app, we'd track if they already arrived today.
+            if dist < 50:
+                 # Check if recently notified
+                 existing = await notif_coll.find_one({
+                     "agentId": ObjectId(agentId),
+                     "customerId": cust_id,
+                     "type": "arrival",
+                     "timestamp": {"$gt": datetime.utcnow().replace(hour=0, minute=0, second=0)}
+                 })
+                 if not existing:
+                     await notif_coll.insert_one({
+                         "agentId": ObjectId(agentId),
+                         "agentName": agent.get("name"),
+                         "customerId": cust_id,
+                         "customerName": customer.get("name"),
+                         "type": "arrival",
+                         "message": f"{agent.get('name')} arrived at {customer.get('name')}'s house",
+                         "timestamp": datetime.utcnow(),
+                         "read": False
+                     })
 
     update = {
         "$set": {"journeyTracking.lastLocation": {"lat": lat, "lng": lng}},
@@ -102,10 +150,20 @@ async def track_location(agentId: str, payload: dict):
         update["$push"]["journeyTracking.visitedPoints"] = point
     else:
         update["$push"]["journeyTracking.deviationPoints"] = point
+        # Send deviation notification
+        await notif_coll.insert_one({
+            "agentId": ObjectId(agentId),
+            "agentName": agent.get("name"),
+            "type": "deviation",
+            "message": f"ALERT: Agent {agent.get('name')} has deviated from the optimized route!",
+            "timestamp": datetime.utcnow(),
+            "read": False
+        })
 
     await agent_coll.update_one({"_id": ObjectId(agentId)}, update)
 
     return {"status": 200, "onRoute": is_on_route, "movementSaved": True}
+
 
 
 # @router.post("/track-location/{agentId}")

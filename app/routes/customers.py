@@ -197,3 +197,52 @@ async def update_customer(id: str, payload: CustomerUpdate):
         return {"status": 200, "msg": "Customer updated successfully.", "data": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/collect-cash/{customerId}")
+async def collect_cash(customerId: str, payload: dict):
+    if not ObjectId.is_valid(customerId):
+        raise HTTPException(status_code=400, detail="Invalid Customer ID")
+
+    amount = payload.get("amount", 0)
+    agentId = payload.get("agentId")
+    agentName = payload.get("agentName", "Agent")
+
+    if not agentId or not ObjectId.is_valid(agentId):
+        raise HTTPException(status_code=400, detail="Invalid Agent ID")
+
+    from datetime import datetime
+    customer_coll = get_collection("customers")
+    notif_coll = get_collection("notifications")
+
+    # Update Customer
+    customer = await customer_coll.find_one_and_update(
+        {"_id": ObjectId(customerId)},
+        {
+            "$set": {
+                "cashCollected": amount,
+                "verificationStatus": "verified",
+                "collectedAt": datetime.utcnow(),
+            }
+        },
+        return_document=True,
+    )
+
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    # Create Notification
+    notification = {
+        "agentId": ObjectId(agentId),
+        "agentName": agentName,
+        "customerId": ObjectId(customerId),
+        "customerName": customer.get("name"),
+        "type": "cash_collected",
+        "message": f"{agentName} collected Rs.{amount} from {customer.get('name')}",
+        "timestamp": datetime.utcnow(),
+        "read": False,
+    }
+    await notif_coll.insert_one(notification)
+
+    return {"status": 200, "msg": "Cash collected and notified manager", "data": amount}
+
